@@ -3,6 +3,7 @@ import pandas as pd
 import pandas_ta as ta
 import requests
 import time
+import streamlit.components.v1 as components
 
 # --- 1. Python 後端大腦區 (處理數據與策略) ---
 
@@ -24,22 +25,23 @@ def calculate_strategy(df):
     我們使用 pandas-ta 庫來計算真正的 RSI 指標。
     """
     if df.empty:
-        return 0, 0, "No Data"
+        return 0, 0, "No Data", "neutral", 0
 
     # 計算 RSI (14週期)
     df['rsi'] = ta.rsi(df['close'], length=14)
     
     current_price = df['close'].iloc[-1]
-    current_rsi = df['rsi'].iloc[-1]
+    
+    # 處理資料不足導致 RSI 為 NaN 的情況
+    if pd.isna(df['rsi'].iloc[-1]):
+        current_rsi = 50.0
+    else:
+        current_rsi = df['rsi'].iloc[-1]
     
     # --- 策略邏輯 (RSI 逆勢策略) ---
-    # RSI > 70 = 超買 (看跌)
-    # RSI < 30 = 超賣 (看漲)
-    # 中間 = 觀望
-    
-    prediction = current_price # 預設持平
+    prediction = current_price 
     signal = "觀望 Wait"
-    bias = "neutral" # 用來控制顏色
+    bias = "neutral" 
 
     if current_rsi > 70:
         prediction = current_price * 0.995 # 預測跌
@@ -52,7 +54,7 @@ def calculate_strategy(df):
     else:
         # 簡單趨勢跟隨
         sma = df['close'].rolling(20).mean().iloc[-1]
-        if current_price > sma:
+        if not pd.isna(sma) and current_price > sma:
             prediction = current_price * 1.001
             signal = "🌊 趨勢向上 (RSI中性)"
             bias = "up"
@@ -65,16 +67,13 @@ def calculate_strategy(df):
 
 # --- 2. 執行運算 ---
 
-# 設定頁面配置 (隱藏原本 Streamlit 的醜醜邊框)
 st.set_page_config(page_title="Python戰情室", layout="wide")
 
-# 獲取數據
 df = get_binance_data()
 price, predict, sig, bias, rsi_val = calculate_strategy(df)
 
-# --- 3. 前端 HTML 介面區 (你的設計) ---
+# --- 3. 前端 HTML 介面區 ---
 
-# 我們將 Python 算出來的變數，插入到 HTML 字串中
 html_code = f"""
 <!DOCTYPE html>
 <html>
@@ -142,10 +141,7 @@ html_code = f"""
 </html>
 """
 
-# 渲染 HTML
-st.components.v1.html(html_code, height=400)
+components.html(html_code, height=400)
 
-# 自動刷新 (每 10 秒重跑一次 Python 腳本)
 time.sleep(10)
 st.rerun()
-"""
