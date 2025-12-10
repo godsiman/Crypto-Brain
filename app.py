@@ -1,44 +1,59 @@
 import streamlit as st
 import pandas as pd
 import pandas_ta as ta
-import requests
+import yfinance as yf
 import time
 import streamlit.components.v1 as components
 
 # --- 1. Python 後端大腦區 (處理數據與策略) ---
 
-def get_binance_data(symbol="BTCUSDT", interval="5m", limit=100):
-    """從幣安抓取 K 線數據"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+def get_crypto_data(symbol="BTC-USD", period="1d", interval="5m"):
+    """
+    改用 yfinance 抓取數據，解決 Streamlit Cloud 被幣安擋IP的問題
+    """
     try:
-        response = requests.get(url)
-        data = response.json()
-        df = pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'q_vol', 'num_trades', 't_base', 't_quote', 'ignore'])
-        df['close'] = pd.to_numeric(df['close'])
+        # 下載數據
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        
+        # yfinance 的欄位通常是多層索引，我們簡化它
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
+        # 重新命名欄位以符合習慣 (Yahoo 的欄位是 Capitalize 的)
+        df = df.rename(columns={
+            "Open": "open", 
+            "High": "high", 
+            "Low": "low", 
+            "Close": "close", 
+            "Volume": "volume"
+        })
+        
         return df
-    except:
+    except Exception as e:
+        print(f"Error loading data: {e}")
         return pd.DataFrame()
 
 def calculate_strategy(df):
     """
-    這裡是用 Python 寫的策略！
-    我們使用 pandas-ta 庫來計算真正的 RSI 指標。
+    計算 RSI 與 預測邏輯
     """
-    if df.empty:
-        return 0, 0, "No Data", "neutral", 0
+    if df.empty or len(df) < 20:
+        return 0, 0, "等待數據...", "neutral", 0
 
     # 計算 RSI (14週期)
     df['rsi'] = ta.rsi(df['close'], length=14)
     
-    current_price = df['close'].iloc[-1]
+    # 取得最新一筆資料
+    current_price = float(df['close'].iloc[-1])
     
-    # 處理資料不足導致 RSI 為 NaN 的情況
-    if pd.isna(df['rsi'].iloc[-1]):
+    # 處理 RSI 為空值的情況
+    last_rsi = df['rsi'].iloc[-1]
+    if pd.isna(last_rsi):
         current_rsi = 50.0
     else:
-        current_rsi = df['rsi'].iloc[-1]
+        current_rsi = float(last_rsi)
     
-    # --- 策略邏輯 (RSI 逆勢策略) ---
+    # --- 策略邏輯 ---
     prediction = current_price 
     signal = "觀望 Wait"
     bias = "neutral" 
@@ -52,7 +67,7 @@ def calculate_strategy(df):
         signal = "🟢 超賣! 做多 Long"
         bias = "up"
     else:
-        # 簡單趨勢跟隨
+        # 簡單趨勢跟隨 (SMA 20)
         sma = df['close'].rolling(20).mean().iloc[-1]
         if not pd.isna(sma) and current_price > sma:
             prediction = current_price * 1.001
@@ -69,7 +84,8 @@ def calculate_strategy(df):
 
 st.set_page_config(page_title="Python戰情室", layout="wide")
 
-df = get_binance_data()
+# 獲取數據 (使用 BTC-USD)
+df = get_crypto_data(symbol="BTC-USD")
 price, predict, sig, bias, rsi_val = calculate_strategy(df)
 
 # --- 3. 前端 HTML 介面區 ---
@@ -118,7 +134,7 @@ html_code = f"""
 
     <div class="grid">
         <div class="card">
-            <div class="label">Binance 現價</div>
+            <div class="label">BTC-USD 現價 (Yahoo)</div>
             <div class="value">${price:,.2f}</div>
         </div>
 
@@ -134,7 +150,7 @@ html_code = f"""
     <hr style="border-color: #333;">
     
     <div style="color: #666; font-size: 0.8em; text-align: center;">
-        數據來源: Binance API | 策略引擎: Python Pandas-TA | 刷新頻率: 10秒
+        數據來源: Yahoo Finance | 策略引擎: Python Pandas-TA | 自動刷新
     </div>
 
 </body>
@@ -143,5 +159,5 @@ html_code = f"""
 
 components.html(html_code, height=400)
 
-time.sleep(10)
+time.sleep(15) # 設定 15 秒刷新一次，避免太頻繁被 Yahoo 擋
 st.rerun()
