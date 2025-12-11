@@ -2,4 +2,4 @@ streamlit
 pandas
 numpy
 pandas_ta
-yfinance
+ccxt
