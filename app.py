@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd
 import pandas_ta as ta
 import ccxt
-import time
 import concurrent.futures
 import streamlit.components.v1 as components
 
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Real-Time)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Stable)", layout="wide")
 
 # 定義基礎幣種清單
 BASE_COINS = {
@@ -151,8 +150,8 @@ def process_single_coin(name, symbol, timeframe):
     except Exception as e:
         return name, None
 
-# --- 快取層 (改為 3 秒 TTL，接近即時) ---
-@st.cache_data(ttl=3, show_spinner=False)
+# --- 快取層 (改為 10 秒 TTL，不需要太短因為是手動刷新) ---
+@st.cache_data(ttl=10, show_spinner=False)
 def fetch_all_market_data(coins_dict, timeframe):
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -166,16 +165,14 @@ def fetch_all_market_data(coins_dict, timeframe):
     return results
 
 # ==========================================
-# 3. 側邊欄：控制台 (加入自動刷新開關)
+# 3. 側邊欄：控制台
 # ==========================================
-st.sidebar.header("🚀 即時市場掃描")
-
-# 自動刷新開關
-auto_refresh = st.sidebar.toggle("⚡ 開啟即時刷新 (3秒)", value=True)
+st.sidebar.header("🚀 市場掃描 (Kraken)")
 timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h"], value="15m")
 
-# 執行抓取
-scan_results = fetch_all_market_data(BASE_COINS, timeframe)
+# 這裡只會執行一次抓取，之後除非按下刷新，否則不會動
+with st.spinner("⚡ 正在掃描市場訊號..."):
+    scan_results = fetch_all_market_data(BASE_COINS, timeframe)
 
 # 定義顯示格式函式
 def format_func_scanner(option_name):
@@ -195,10 +192,10 @@ selected_coin_name = st.sidebar.radio(
     "點擊查看詳情：", 
     options=list(BASE_COINS.keys()), 
     format_func=format_func_scanner,
-    key="main_coin_selector"
+    key="main_coin_selector" # 保持 key 以防跳動
 )
 
-if st.sidebar.button("🔄 手動刷新"):
+if st.sidebar.button("🔄 手動刷新數據"):
     st.cache_data.clear()
     st.rerun()
 
@@ -317,10 +314,3 @@ if data:
     components.html(html_content, height=600, scrolling=True)
 else:
     st.error("暫時無法獲取數據，請稍後再試。")
-
-# ==========================================
-# 5. 自動刷新循環 (核心改動)
-# ==========================================
-if auto_refresh:
-    time.sleep(3) # 等待 3 秒
-    st.rerun()    # 強制重跑程式
