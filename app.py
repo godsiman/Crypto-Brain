@@ -2,27 +2,24 @@ import streamlit as st
 import pandas as pd
 import pandas_ta as ta
 import ccxt
-import numpy as np
 import time
 import streamlit.components.v1 as components
-from datetime import datetime
 
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Kraken)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Scanner)", layout="wide")
 
-# 改用 Kraken 的交易對代碼 (USD)
-# 這裡能確保在美國主機上也能抓到即時數據
-COINS = {
-    "比特幣 (BTC)": "BTC/USD",
-    "以太幣 (ETH)": "ETH/USD",
-    "索拉納 (SOL)": "SOL/USD",
-    "狗狗幣 (DOGE)": "DOGE/USD",
-    "瑞波幣 (XRP)": "XRP/USD",
-    "艾達幣 (ADA)": "ADA/USD",
-    "佩佩蛙 (PEPE)": "PEPE/USD",
-    "柴犬幣 (SHIB)": "SHIB/USD"
+# 定義基礎幣種清單
+BASE_COINS = {
+    "BTC": "BTC/USD",
+    "ETH": "ETH/USD",
+    "SOL": "SOL/USD",
+    "DOGE": "DOGE/USD",
+    "XRP": "XRP/USD",
+    "ADA": "ADA/USD",
+    "PEPE": "PEPE/USD",
+    "SHIB": "SHIB/USD"
 }
 
 PARAMS = {
@@ -34,42 +31,25 @@ PARAMS = {
 }
 
 # ==========================================
-# 2. 輔助功能：智慧價格顯示 (解決小數位問題)
+# 2. 核心：數據抓取與指標計算
 # ==========================================
 def format_price(val):
-    """
-    根據價格大小，自動決定顯示幾位小數
-    """
     if val is None or val == 0: return "$0.00"
-    
-    if val < 0.0001:
-        return f"${val:.8f}" # PEPE/SHIB 顯示 8 位 (例如 $0.00001234)
-    elif val < 10.0:
-        return f"${val:.4f}" # DOGE/ADA/XRP 顯示 4 位 (例如 $0.4321)
-    else:
-        return f"${val:,.2f}" # BTC/ETH 顯示 2 位 (例如 $95,000.00)
+    if val < 0.0001: return f"${val:.8f}"
+    elif val < 10.0: return f"${val:.4f}"
+    else: return f"${val:,.2f}"
 
-# ==========================================
-# 3. 核心數據抓取 (切換至 Kraken)
-# ==========================================
-@st.cache_data(ttl=5) # 5秒快取，接近即時
-def get_crypto_data(symbol, timeframe='15m', limit=200):
+@st.cache_data(ttl=15) # 設定 15 秒快取，避免切換時卡頓
+def fetch_and_analyze(symbol, timeframe='15m', limit=200):
     try:
-        # 初始化 Kraken 交易所 (美國 IP 友善)
-        exchange = ccxt.kraken()
-        
-        # 抓取 K 線數據
+        exchange = ccxt.kraken() # 使用 Kraken
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        
-        # 轉成 DataFrame
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
         # --- 指標計算 ---
         df['ema20'] = ta.ema(df['close'], length=PARAMS['ema_s'])
         df['ema50'] = ta.ema(df['close'], length=PARAMS['ema_m'])
         df['ema200'] = ta.ema(df['close'], length=PARAMS['ema_l'])
-        
         df['rsi'] = ta.rsi(df['close'], length=PARAMS['rsi_len'])
         
         bb = ta.bbands(df['close'], length=PARAMS['bb_len'], std=PARAMS['bb_std'])
@@ -77,23 +57,18 @@ def get_crypto_data(symbol, timeframe='15m', limit=200):
             df['bb_u'] = bb.iloc[:, 0]
             df['bb_m'] = bb.iloc[:, 1]
             df['bb_l'] = bb.iloc[:, 2]
-            df['bb_w'] = bb.iloc[:, 4]
 
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=PARAMS['atr_len'])
-
         df['struct_h'] = df['high'].rolling(PARAMS['fib_window']).max()
         df['struct_l'] = df['low'].rolling(PARAMS['fib_window']).min()
-        
         df['vol_ma'] = df['volume'].rolling(20).mean()
 
-        return df
+        # --- 策略分析 (Return Score) ---
+        return analyze_logic(df)
+        
     except Exception as e:
-        print(f"Exchange Error: {e}")
-        return pd.DataFrame()
+        return None
 
-# ==========================================
-# 4. 策略大腦
-# ==========================================
 def check_candle_pattern(row, prev):
     body = abs(row['close'] - row['open'])
     total_len = row['high'] - row['low']
@@ -102,204 +77,214 @@ def check_candle_pattern(row, prev):
     upper_wick = row['high'] - max(row['close'], row['open'])
     lower_wick = min(row['close'], row['open']) - row['low']
     
-    # 稍微嚴格一點的 Pin Bar 定義
     is_pin_bull = lower_wick > (total_len * 0.6)
     is_pin_bear = upper_wick > (total_len * 0.6)
-    
     is_engulf_bull = (row['close'] > row['open']) and (prev['close'] < prev['open']) and (row['close'] > prev['high']) and (row['open'] < prev['low'])
     is_engulf_bear = (row['close'] < row['open']) and (prev['close'] > prev['open']) and (row['close'] < prev['low']) and (row['open'] > prev['high'])
-    
     return is_pin_bull, is_pin_bear, is_engulf_bull, is_engulf_bear
 
-def analyze_strategy(df):
+def analyze_logic(df):
     if df is None or df.empty: return None
 
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     price = curr['close']
     
-    # 趨勢
+    # 趨勢判斷
     trend = "盤整 (No Trade)"
     direction = 0
-    
-    # 需檢查 NaN
-    if pd.isna(curr['ema200']): 
-        return None
-
-    if curr['ema20'] > curr['ema50'] > curr['ema200']:
-        trend = "🔥 多頭趨勢 (Long Only)"
-        direction = 1
-    elif curr['ema20'] < curr['ema50'] < curr['ema200']:
-        trend = "❄️ 空頭趨勢 (Short Only)"
-        direction = -1
+    if pd.notna(curr['ema200']):
+        if curr['ema20'] > curr['ema50'] > curr['ema200']:
+            trend = "🔥 多頭趨勢"
+            direction = 1
+        elif curr['ema20'] < curr['ema50'] < curr['ema200']:
+            trend = "❄️ 空頭趨勢"
+            direction = -1
 
     # 計分
     score = 0
     reasons = []
-    
     pin_bull, pin_bear, engulf_bull, engulf_bear = check_candle_pattern(curr, prev)
-    
     diff = curr['struct_h'] - curr['struct_l']
-    fib_0618_level = curr['struct_h'] - (diff * 0.618)
+    fib_0618 = curr['struct_h'] - (diff * 0.618)
     
-    if direction == 1:
+    if direction == 1: # 多頭條件
         recent_low = df['low'].iloc[-10:-1].min()
-        if curr['low'] < recent_low and curr['close'] > recent_low:
-            score += 1; reasons.append("✅ 掃 Liquidity (下影線洗盤)")
-        if prev['rsi'] < 40 and curr['rsi'] > 40:
-            score += 1; reasons.append("✅ RSI 低檔反轉")
-        if pin_bull or engulf_bull:
-            score += 1; reasons.append("✅ K線 (PinBar/吞沒)")
-        if curr['close'] > curr['bb_m'] and prev['close'] < curr['bb_m']:
-            score += 1; reasons.append("✅ 站回布林中軌")
-        if curr['volume'] > curr['vol_ma'] * 1.2:
-            score += 1; reasons.append("✅ 成交量放大")
-        if abs(price - fib_0618_level)/price < 0.005:
-            score += 1; reasons.append("✅ 回踩 Fib 0.618")
+        if curr['low'] < recent_low and curr['close'] > recent_low: score += 1; reasons.append("✅ 掃 Liquidity")
+        if prev['rsi'] < 40 and curr['rsi'] > 40: score += 1; reasons.append("✅ RSI 低檔反轉")
+        if pin_bull or engulf_bull: score += 1; reasons.append("✅ K線 (PinBar/吞沒)")
+        if curr['close'] > curr['bb_m'] and prev['close'] < curr['bb_m']: score += 1; reasons.append("✅ 站回布林中軌")
+        if curr['volume'] > curr['vol_ma'] * 1.2: score += 1; reasons.append("✅ 成交量放大")
+        if abs(price - fib_0618)/price < 0.005: score += 1; reasons.append("✅ 回踩 Fib 0.618")
 
-    elif direction == -1:
+    elif direction == -1: # 空頭條件
         recent_high = df['high'].iloc[-10:-1].max()
-        if curr['high'] > recent_high and curr['close'] < recent_high:
-            score += 1; reasons.append("✅ 掃 Liquidity (假突破)")
-        if prev['rsi'] > 60 and curr['rsi'] < 60:
-            score += 1; reasons.append("✅ RSI 高檔回落")
-        if pin_bear or engulf_bear:
-            score += 1; reasons.append("✅ K線 (倒鎚/吞沒)")
-        if curr['close'] < curr['bb_m'] and prev['close'] > curr['bb_m']:
-            score += 1; reasons.append("✅ 跌破布林中軌")
-        if curr['volume'] > curr['vol_ma'] * 1.2:
-            score += 1; reasons.append("✅ 成交量放大")
-        if abs(price - fib_0618_level)/price < 0.005:
-            score += 1; reasons.append("✅ 反彈至 Fib 0.618")
+        if curr['high'] > recent_high and curr['close'] < recent_high: score += 1; reasons.append("✅ 掃 Liquidity")
+        if prev['rsi'] > 60 and curr['rsi'] < 60: score += 1; reasons.append("✅ RSI 高檔回落")
+        if pin_bear or engulf_bear: score += 1; reasons.append("✅ K線 (倒鎚/吞沒)")
+        if curr['close'] < curr['bb_m'] and prev['close'] > curr['bb_m']: score += 1; reasons.append("✅ 跌破布林中軌")
+        if curr['volume'] > curr['vol_ma'] * 1.2: score += 1; reasons.append("✅ 成交量放大")
+        if abs(price - fib_0618)/price < 0.005: score += 1; reasons.append("✅ 反彈至 Fib 0.618")
 
     # 止盈止損
-    atr_val = curr['atr']
-    sl_price = 0; tp1_price = 0; tp2_price = 0
-    
-    if direction == 1:
-        sl_price = curr['low'] - (2 * atr_val)
-        tp1_price = curr['struct_h']
-        tp2_price = curr['struct_h'] + (diff * 0.618)
-    elif direction == -1:
-        sl_price = curr['high'] + (2 * atr_val)
-        tp1_price = curr['struct_l']
-        tp2_price = curr['struct_l'] - (diff * 0.618)
+    atr = curr['atr']
+    sl = curr['low'] - (2*atr) if direction == 1 else curr['high'] + (2*atr)
+    tp1 = curr['struct_h'] if direction == 1 else curr['struct_l']
+    tp2 = curr['struct_h'] + (diff * 0.618) if direction == 1 else curr['struct_l'] - (diff * 0.618)
 
     return {
         "price": price, "trend": trend, "direction": direction,
         "score": score, "reasons": reasons,
-        "sl": sl_price, "tp1": tp1_price, "tp2": tp2_price,
-        "rsi": curr['rsi']
+        "sl": sl, "tp1": tp1, "tp2": tp2, "rsi": curr['rsi']
     }
 
 # ==========================================
-# 5. 前端介面渲染
+# 3. 側邊欄：全市場掃描 (Market Scanner)
 # ==========================================
-st.sidebar.header("🎛️ 實戰控制台 (Kraken)")
-selected_coin = st.sidebar.radio("監控幣種", list(COINS.keys()))
-timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h", "1d"], value="15m")
+st.sidebar.header("📡 全市場掃描 (Kraken)")
+timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h"], value="15m")
 
-if st.sidebar.button("🔄 強制刷新"):
+# 在這裡先掃描一次所有幣種，產生帶有燈號的清單
+display_options = {}
+reverse_lookup = {} # 用來反查 symbol
+
+with st.spinner("正在掃描市場訊號..."):
+    for name, symbol in BASE_COINS.items():
+        # 預設狀態
+        label = f"⚪ {name}"
+        
+        # 呼叫分析函式 (有快取，所以速度會越來越快)
+        data = fetch_and_analyze(symbol, timeframe=timeframe)
+        
+        if data:
+            price_fmt = format_price(data['price'])
+            if data['score'] >= 3:
+                # 綠燈：有訊號
+                label = f"🟢 {name} {price_fmt}"
+            elif data['direction'] == 0:
+                # 灰燈：盤整
+                label = f"⚪ {name} {price_fmt}"
+            else:
+                # 紅燈：有趨勢但條件未滿 (觀望)
+                label = f"🔴 {name} {price_fmt}"
+        else:
+            label = f"⚠️ {name} (Error)"
+            
+        display_options[label] = symbol
+        reverse_lookup[label] = name
+
+# 側邊欄選單 (顯示帶有燈號的選項)
+selected_label = st.sidebar.radio("點擊查看詳情：", list(display_options.keys()))
+selected_symbol = display_options[selected_label]
+selected_name = reverse_lookup[selected_label]
+
+if st.sidebar.button("🔄 重新掃描"):
     st.cache_data.clear()
     st.rerun()
 
-symbol = COINS[selected_coin]
-df = get_crypto_data(symbol, timeframe=timeframe)
+# ==========================================
+# 4. 主畫面渲染
+# ==========================================
+data = fetch_and_analyze(selected_symbol, timeframe=timeframe)
 
-if df is not None and not df.empty:
-    data = analyze_strategy(df)
+if data:
+    p_price = format_price(data['price'])
+    p_sl = format_price(data['sl'])
+    p_tp1 = format_price(data['tp1'])
+    p_tp2 = format_price(data['tp2'])
+
+    # 燈號顏色邏輯
+    card_color = "#333" # 預設深灰
+    signal_text = "⏳ 觀望中 (Wait)"
     
-    if data:
-        # 使用 format_price 處理所有價格顯示
-        p_price = format_price(data['price'])
-        p_sl = format_price(data['sl'])
-        p_tp1 = format_price(data['tp1'])
-        p_tp2 = format_price(data['tp2'])
-
-        card_color = "#333"
-        signal_text = "⏳ 等待訊號 (Wait)"
-        
-        if data['score'] >= 3:
-            if data['direction'] == 1:
-                card_color = "rgba(0, 204, 150, 0.2)"
-                signal_text = f"🚀 條件滿足 (Score {data['score']}) - 做多 LONG"
-            elif data['direction'] == -1:
-                card_color = "rgba(239, 85, 59, 0.2)"
-                signal_text = f"🔻 條件滿足 (Score {data['score']}) - 做空 SHORT"
-        else:
-            signal_text = f"👀 觀察中 (Score {data['score']}/6)"
-
-        reasons_html = ""
-        for r in data['reasons']:
-            reasons_html += f"<div style='color:#fff; font-size:0.9em; margin-bottom:3px;'>{r}</div>"
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0e1117; color: #fafafa; }}
-            .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
-            .card {{ background-color: #262730; padding: 20px; border-radius: 12px; border: 1px solid #363945; }}
-            .signal-card {{ background-color: {card_color}; border: 1px solid #fff; padding: 20px; border-radius: 12px; }}
-            .big-val {{ font-size: 2.2em; font-weight: bold; font-family: monospace; }}
-            .label {{ color: #aaa; font-size: 0.9em; margin-bottom: 5px; }}
-            .tp-sl-box {{ background: #111; padding: 10px; border-radius: 5px; margin-top: 10px; font-family: monospace; }}
-        </style>
-        </head>
-        <body>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-                <h1>🔥 實戰模板 (Kraken 直連)</h1>
-                <div style="text-align:right; color:#888;">{symbol} | {timeframe}</div>
-            </div>
-
-            <div class="grid">
-                <div class="card">
-                    <div class="label">Step 1: 趨勢與現價</div>
-                    <div class="big-val">{p_price}</div>
-                    <div style="font-size: 1.1em; font-weight:bold; margin-top:10px;">
-                        {data['trend']}
-                    </div>
-                    <div style="font-size:0.9em; color:#ccc; margin-top:5px;">
-                        RSI: <span style="color:{'#ef553b' if data['rsi']>65 else '#00cc96' if data['rsi']<35 else '#ccc'}">{data['rsi']:.1f}</span>
-                    </div>
-                </div>
-
-                <div class="signal-card">
-                    <div class="label">Step 2: 入場訊號 (需 >= 3 分)</div>
-                    <div style="font-size: 1.5em; font-weight:bold; margin-bottom:10px;">
-                        {signal_text}
-                    </div>
-                    {reasons_html if data['reasons'] else "<div style='color:#888;'>等待條件觸發...</div>"}
-                </div>
-
-                <div class="card">
-                    <div class="label">Step 3: 止盈止損 (智慧小數)</div>
-                    <div class="tp-sl-box">
-                        <div style="display:flex; justify-content:space-between; color:#ef553b;">
-                            <span>⛔ 止損 (SL):</span>
-                            <span>{p_sl}</span>
-                        </div>
-                    </div>
-                    
-                    <div class="tp-sl-box">
-                        <div style="display:flex; justify-content:space-between; color:#00cc96;">
-                            <span>💰 止盈 1:</span>
-                            <span>{p_tp1}</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; color:#00cc96; margin-top:5px;">
-                            <span>💰 止盈 2 (1.618):</span>
-                            <span>{p_tp2}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        components.html(html_content, height=550, scrolling=True)
+    if data['score'] >= 3:
+        if data['direction'] == 1:
+            card_color = "rgba(0, 204, 150, 0.2)" # 綠底
+            signal_text = f"🚀 訊號成立 (Score {data['score']}) - 做多 LONG"
+        elif data['direction'] == -1:
+            card_color = "rgba(239, 85, 59, 0.2)" # 紅底
+            signal_text = f"🔻 訊號成立 (Score {data['score']}) - 做空 SHORT"
     else:
-        st.warning("數據載入中，或目前無足夠 K 線計算指標...")
+        signal_text = f"👀 條件未滿 (Score {data['score']}/6)"
+
+    # 原因列表
+    reasons_html = ""
+    for r in data['reasons']:
+        reasons_html += f"<div style='color:#fff; font-size:0.9em; margin-bottom:3px; padding-left:10px; border-left:2px solid #888;'>{r}</div>"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        body {{ font-family: 'Segoe UI', sans-serif; background-color: #0e1117; color: #fafafa; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+        .card {{ background-color: #262730; padding: 20px; border-radius: 12px; border: 1px solid #363945; }}
+        .signal-card {{ background-color: {card_color}; border: 1px solid #fff; padding: 20px; border-radius: 12px; }}
+        .big-val {{ font-size: 2.2em; font-weight: bold; font-family: monospace; }}
+        .label {{ color: #aaa; font-size: 0.9em; margin-bottom: 5px; }}
+        .tp-sl-box {{ background: #111; padding: 10px; border-radius: 5px; margin-top: 10px; font-family: monospace; }}
+        .strategy-footer {{ margin-top:30px; padding:15px; background:#1c1e24; border-radius:8px; font-size:0.85em; color:#aaa; text-align:center; border:1px dashed #444; }}
+    </style>
+    </head>
+    <body>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+            <h1>🔥 {selected_name} 智能戰情室</h1>
+            <div style="text-align:right; color:#888;">Kraken | {timeframe}</div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="label">Step 1: 趨勢與現價</div>
+                <div class="big-val">{p_price}</div>
+                <div style="font-size: 1.1em; font-weight:bold; margin-top:10px;">
+                    {data['trend']}
+                </div>
+                <div style="font-size:0.9em; color:#ccc; margin-top:5px;">
+                    RSI: <span style="color:{'#ef553b' if data['rsi']>65 else '#00cc96' if data['rsi']<35 else '#ccc'}">{data['rsi']:.1f}</span>
+                </div>
+            </div>
+
+            <div class="signal-card">
+                <div class="label">Step 2: 入場訊號 (需 >= 3 分)</div>
+                <div style="font-size: 1.5em; font-weight:bold; margin-bottom:10px;">
+                    {signal_text}
+                </div>
+                <div style="margin-top:15px;">
+                    {reasons_html if data['reasons'] else "<div style='color:#ccc; font-style:italic;'>暫無觸發條件...</div>"}
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="label">Step 3: 止盈止損 (Pro)</div>
+                <div class="tp-sl-box">
+                    <div style="display:flex; justify-content:space-between; color:#ef553b;">
+                        <span>⛔ 止損 (SL):</span>
+                        <span>{p_sl}</span>
+                    </div>
+                </div>
+                <div class="tp-sl-box">
+                    <div style="display:flex; justify-content:space-between; color:#00cc96;">
+                        <span>💰 止盈 1:</span>
+                        <span>{p_tp1}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; color:#00cc96; margin-top:5px;">
+                        <span>💰 止盈 2 (1.618):</span>
+                        <span>{p_tp2}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="strategy-footer">
+            💎 <b>策略核心 (God Mode)</b><br>
+            方向靠 EMA20/50/200 排列 ＋ 市場結構<br>
+            入場靠 Liquidity 掃單後反轉 (需滿足 3 個以上濾網)<br>
+            止盈看 Fib 1.618 延伸位｜止損動態設在 2 ATR 處
+        </div>
+    </body>
+    </html>
+    """
+    components.html(html_content, height=600, scrolling=True)
 else:
-    st.error(f"無法抓取 {symbol} 的數據。")
-    st.write("請確認 Kraken 是否支援此幣種交易對 (例如 PEPE/USD)。")
+    st.error("暫時無法獲取數據，請稍後再試。")
