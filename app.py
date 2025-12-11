@@ -10,19 +10,19 @@ from datetime import datetime
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Binance)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Kraken)", layout="wide")
 
-# 這裡改用交易所的標準代碼 (Symbol)
+# 改用 Kraken 的交易對代碼 (USD)
+# 這裡能確保在美國主機上也能抓到即時數據
 COINS = {
-    "比特幣 (BTC)": "BTC/USDT",
-    "以太幣 (ETH)": "ETH/USDT",
-    "索拉納 (SOL)": "SOL/USDT",
-    "狗狗幣 (DOGE)": "DOGE/USDT",
-    "幣安幣 (BNB)": "BNB/USDT",
-    "瑞波幣 (XRP)": "XRP/USDT",
-    "艾達幣 (ADA)": "ADA/USDT",
-    "佩佩蛙 (PEPE)": "PEPE/USDT", # 測試超小幣種
-    "柴犬幣 (SHIB)": "SHIB/USDT"
+    "比特幣 (BTC)": "BTC/USD",
+    "以太幣 (ETH)": "ETH/USD",
+    "索拉納 (SOL)": "SOL/USD",
+    "狗狗幣 (DOGE)": "DOGE/USD",
+    "瑞波幣 (XRP)": "XRP/USD",
+    "艾達幣 (ADA)": "ADA/USD",
+    "佩佩蛙 (PEPE)": "PEPE/USD",
+    "柴犬幣 (SHIB)": "SHIB/USD"
 }
 
 PARAMS = {
@@ -34,41 +34,38 @@ PARAMS = {
 }
 
 # ==========================================
-# 2. 輔助功能：智慧價格顯示
+# 2. 輔助功能：智慧價格顯示 (解決小數位問題)
 # ==========================================
 def format_price(val):
     """
-    根據價格大小，自動決定小數位數
+    根據價格大小，自動決定顯示幾位小數
     """
     if val is None or val == 0: return "$0.00"
     
     if val < 0.0001:
-        return f"${val:.8f}" # 像 PEPE 這種
-    elif val < 1.0:
-        return f"${val:.4f}" # 像 DOGE, ADA, XRP
+        return f"${val:.8f}" # PEPE/SHIB 顯示 8 位 (例如 $0.00001234)
+    elif val < 10.0:
+        return f"${val:.4f}" # DOGE/ADA/XRP 顯示 4 位 (例如 $0.4321)
     else:
-        return f"${val:,.2f}" # 像 BTC, ETH
+        return f"${val:,.2f}" # BTC/ETH 顯示 2 位 (例如 $95,000.00)
 
 # ==========================================
-# 3. 核心數據抓取 (改用 CCXT 接幣安)
+# 3. 核心數據抓取 (切換至 Kraken)
 # ==========================================
-# 縮短快取時間到 5 秒，因為交易所數據是即時的
-@st.cache_data(ttl=5)
-def get_binance_data(symbol, timeframe='15m', limit=200):
+@st.cache_data(ttl=5) # 5秒快取，接近即時
+def get_crypto_data(symbol, timeframe='15m', limit=200):
     try:
-        # 初始化交易所 (使用幣安公開 API)
-        exchange = ccxt.binance({
-            'enableRateLimit': True, # 防止請求太快被鎖
-        })
+        # 初始化 Kraken 交易所 (美國 IP 友善)
+        exchange = ccxt.kraken()
         
-        # 抓取 K 線數據 (OHLCV)
+        # 抓取 K 線數據
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         
         # 轉成 DataFrame
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
-        # --- 指標計算 (保持原本邏輯) ---
+        # --- 指標計算 ---
         df['ema20'] = ta.ema(df['close'], length=PARAMS['ema_s'])
         df['ema50'] = ta.ema(df['close'], length=PARAMS['ema_m'])
         df['ema200'] = ta.ema(df['close'], length=PARAMS['ema_l'])
@@ -91,8 +88,8 @@ def get_binance_data(symbol, timeframe='15m', limit=200):
 
         return df
     except Exception as e:
-        print(f"CCXT Error: {e}")
-        return pd.DataFrame() # 回傳空表
+        print(f"Exchange Error: {e}")
+        return pd.DataFrame()
 
 # ==========================================
 # 4. 策略大腦
@@ -105,6 +102,7 @@ def check_candle_pattern(row, prev):
     upper_wick = row['high'] - max(row['close'], row['open'])
     lower_wick = min(row['close'], row['open']) - row['low']
     
+    # 稍微嚴格一點的 Pin Bar 定義
     is_pin_bull = lower_wick > (total_len * 0.6)
     is_pin_bear = upper_wick > (total_len * 0.6)
     
@@ -124,6 +122,10 @@ def analyze_strategy(df):
     trend = "盤整 (No Trade)"
     direction = 0
     
+    # 需檢查 NaN
+    if pd.isna(curr['ema200']): 
+        return None
+
     if curr['ema20'] > curr['ema50'] > curr['ema200']:
         trend = "🔥 多頭趨勢 (Long Only)"
         direction = 1
@@ -139,26 +141,19 @@ def analyze_strategy(df):
     
     diff = curr['struct_h'] - curr['struct_l']
     fib_0618_level = curr['struct_h'] - (diff * 0.618)
-    fib_05_level = curr['struct_h'] - (diff * 0.5)
     
     if direction == 1:
-        # 1. 掃流動性
         recent_low = df['low'].iloc[-10:-1].min()
         if curr['low'] < recent_low and curr['close'] > recent_low:
             score += 1; reasons.append("✅ 掃 Liquidity (下影線洗盤)")
-        # 2. RSI
         if prev['rsi'] < 40 and curr['rsi'] > 40:
             score += 1; reasons.append("✅ RSI 低檔反轉")
-        # 3. K線
         if pin_bull or engulf_bull:
             score += 1; reasons.append("✅ K線 (PinBar/吞沒)")
-        # 4. 布林
         if curr['close'] > curr['bb_m'] and prev['close'] < curr['bb_m']:
             score += 1; reasons.append("✅ 站回布林中軌")
-        # 5. 放量
         if curr['volume'] > curr['vol_ma'] * 1.2:
             score += 1; reasons.append("✅ 成交量放大")
-        # 6. Fib
         if abs(price - fib_0618_level)/price < 0.005:
             score += 1; reasons.append("✅ 回踩 Fib 0.618")
 
@@ -177,7 +172,7 @@ def analyze_strategy(df):
         if abs(price - fib_0618_level)/price < 0.005:
             score += 1; reasons.append("✅ 反彈至 Fib 0.618")
 
-    # 止盈止損計算
+    # 止盈止損
     atr_val = curr['atr']
     sl_price = 0; tp1_price = 0; tp2_price = 0
     
@@ -200,110 +195,111 @@ def analyze_strategy(df):
 # ==========================================
 # 5. 前端介面渲染
 # ==========================================
-st.sidebar.header("🎛️ 幣安實戰控制台")
+st.sidebar.header("🎛️ 實戰控制台 (Kraken)")
 selected_coin = st.sidebar.radio("監控幣種", list(COINS.keys()))
 timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h", "1d"], value="15m")
 
-if st.sidebar.button("🔄 強制刷新 (Binance)"):
+if st.sidebar.button("🔄 強制刷新"):
     st.cache_data.clear()
     st.rerun()
 
 symbol = COINS[selected_coin]
-df = get_binance_data(symbol, timeframe=timeframe)
+df = get_crypto_data(symbol, timeframe=timeframe)
 
 if df is not None and not df.empty:
     data = analyze_strategy(df)
     
-    # 使用新的 format_price 函數來處理顯示
-    p_price = format_price(data['price'])
-    p_sl = format_price(data['sl'])
-    p_tp1 = format_price(data['tp1'])
-    p_tp2 = format_price(data['tp2'])
+    if data:
+        # 使用 format_price 處理所有價格顯示
+        p_price = format_price(data['price'])
+        p_sl = format_price(data['sl'])
+        p_tp1 = format_price(data['tp1'])
+        p_tp2 = format_price(data['tp2'])
 
-    card_color = "#333"
-    signal_text = "⏳ 等待訊號 (Wait)"
-    
-    if data['score'] >= 3:
-        if data['direction'] == 1:
-            card_color = "rgba(0, 204, 150, 0.2)"
-            signal_text = f"🚀 條件滿足 (Score {data['score']}) - 做多 LONG"
-        elif data['direction'] == -1:
-            card_color = "rgba(239, 85, 59, 0.2)"
-            signal_text = f"🔻 條件滿足 (Score {data['score']}) - 做空 SHORT"
+        card_color = "#333"
+        signal_text = "⏳ 等待訊號 (Wait)"
+        
+        if data['score'] >= 3:
+            if data['direction'] == 1:
+                card_color = "rgba(0, 204, 150, 0.2)"
+                signal_text = f"🚀 條件滿足 (Score {data['score']}) - 做多 LONG"
+            elif data['direction'] == -1:
+                card_color = "rgba(239, 85, 59, 0.2)"
+                signal_text = f"🔻 條件滿足 (Score {data['score']}) - 做空 SHORT"
+        else:
+            signal_text = f"👀 觀察中 (Score {data['score']}/6)"
+
+        reasons_html = ""
+        for r in data['reasons']:
+            reasons_html += f"<div style='color:#fff; font-size:0.9em; margin-bottom:3px;'>{r}</div>"
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0e1117; color: #fafafa; }}
+            .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+            .card {{ background-color: #262730; padding: 20px; border-radius: 12px; border: 1px solid #363945; }}
+            .signal-card {{ background-color: {card_color}; border: 1px solid #fff; padding: 20px; border-radius: 12px; }}
+            .big-val {{ font-size: 2.2em; font-weight: bold; font-family: monospace; }}
+            .label {{ color: #aaa; font-size: 0.9em; margin-bottom: 5px; }}
+            .tp-sl-box {{ background: #111; padding: 10px; border-radius: 5px; margin-top: 10px; font-family: monospace; }}
+        </style>
+        </head>
+        <body>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h1>🔥 實戰模板 (Kraken 直連)</h1>
+                <div style="text-align:right; color:#888;">{symbol} | {timeframe}</div>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="label">Step 1: 趨勢與現價</div>
+                    <div class="big-val">{p_price}</div>
+                    <div style="font-size: 1.1em; font-weight:bold; margin-top:10px;">
+                        {data['trend']}
+                    </div>
+                    <div style="font-size:0.9em; color:#ccc; margin-top:5px;">
+                        RSI: <span style="color:{'#ef553b' if data['rsi']>65 else '#00cc96' if data['rsi']<35 else '#ccc'}">{data['rsi']:.1f}</span>
+                    </div>
+                </div>
+
+                <div class="signal-card">
+                    <div class="label">Step 2: 入場訊號 (需 >= 3 分)</div>
+                    <div style="font-size: 1.5em; font-weight:bold; margin-bottom:10px;">
+                        {signal_text}
+                    </div>
+                    {reasons_html if data['reasons'] else "<div style='color:#888;'>等待條件觸發...</div>"}
+                </div>
+
+                <div class="card">
+                    <div class="label">Step 3: 止盈止損 (智慧小數)</div>
+                    <div class="tp-sl-box">
+                        <div style="display:flex; justify-content:space-between; color:#ef553b;">
+                            <span>⛔ 止損 (SL):</span>
+                            <span>{p_sl}</span>
+                        </div>
+                    </div>
+                    
+                    <div class="tp-sl-box">
+                        <div style="display:flex; justify-content:space-between; color:#00cc96;">
+                            <span>💰 止盈 1:</span>
+                            <span>{p_tp1}</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; color:#00cc96; margin-top:5px;">
+                            <span>💰 止盈 2 (1.618):</span>
+                            <span>{p_tp2}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        components.html(html_content, height=550, scrolling=True)
     else:
-        signal_text = f"👀 觀察中 (Score {data['score']}/6)"
-
-    reasons_html = ""
-    for r in data['reasons']:
-        reasons_html += f"<div style='color:#fff; font-size:0.9em; margin-bottom:3px;'>{r}</div>"
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        body {{ font-family: 'Segoe UI', sans-serif; background-color: #0e1117; color: #fafafa; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
-        .card {{ background-color: #262730; padding: 20px; border-radius: 12px; border: 1px solid #363945; }}
-        .signal-card {{ background-color: {card_color}; border: 1px solid #fff; padding: 20px; border-radius: 12px; }}
-        .big-val {{ font-size: 2.2em; font-weight: bold; font-family: monospace; }}
-        .label {{ color: #aaa; font-size: 0.9em; margin-bottom: 5px; }}
-        .tp-sl-box {{ background: #111; padding: 10px; border-radius: 5px; margin-top: 10px; font-family: monospace; }}
-    </style>
-    </head>
-    <body>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-            <h1>🔥 幣安實戰模板 (Binance API)</h1>
-            <div style="text-align:right; color:#888;">{symbol} | {timeframe}</div>
-        </div>
-
-        <div class="grid">
-            <div class="card">
-                <div class="label">Step 1: 趨勢 (Binance)</div>
-                <div class="big-val">{p_price}</div>
-                <div style="font-size: 1.1em; font-weight:bold; margin-top:10px;">
-                    {data['trend']}
-                </div>
-                <div style="font-size:0.9em; color:#ccc; margin-top:5px;">
-                    RSI: <span style="color:{'#ef553b' if data['rsi']>65 else '#00cc96' if data['rsi']<35 else '#ccc'}">{data['rsi']:.1f}</span>
-                </div>
-            </div>
-
-            <div class="signal-card">
-                <div class="label">Step 2: 入場訊號 (需 >= 3 分)</div>
-                <div style="font-size: 1.5em; font-weight:bold; margin-bottom:10px;">
-                    {signal_text}
-                </div>
-                {reasons_html if data['reasons'] else "<div style='color:#888;'>等待條件觸發...</div>"}
-            </div>
-
-            <div class="card">
-                <div class="label">Step 3: 止盈止損 (小數優化版)</div>
-                <div class="tp-sl-box">
-                    <div style="display:flex; justify-content:space-between; color:#ef553b;">
-                        <span>⛔ 止損 (SL):</span>
-                        <span>{p_sl}</span>
-                    </div>
-                </div>
-                
-                <div class="tp-sl-box">
-                    <div style="display:flex; justify-content:space-between; color:#00cc96;">
-                        <span>💰 止盈 1:</span>
-                        <span>{p_tp1}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; color:#00cc96; margin-top:5px;">
-                        <span>💰 止盈 2 (1.618):</span>
-                        <span>{p_tp2}</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    components.html(html_content, height=550, scrolling=True)
-
+        st.warning("數據載入中，或目前無足夠 K 線計算指標...")
 else:
-    st.error("⚠️ 無法連線至幣安 (Binance)。")
-    st.write("可能原因：Streamlit Cloud 主機位於美國，可能被幣安限制 IP。")
-    st.write("💡 建議：此程式碼若在你的本地電腦 (台灣 IP) 執行，將會非常完美且快速。")
+    st.error(f"無法抓取 {symbol} 的數據。")
+    st.write("請確認 Kraken 是否支援此幣種交易對 (例如 PEPE/USD)。")
