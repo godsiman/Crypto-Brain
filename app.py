@@ -3,12 +3,13 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt
 import time
+import concurrent.futures
 import streamlit.components.v1 as components
 
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Stable)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Turbo)", layout="wide")
 
 # 定義基礎幣種清單
 BASE_COINS = {
@@ -31,43 +32,13 @@ PARAMS = {
 }
 
 # ==========================================
-# 2. 核心：數據抓取與指標計算
+# 2. 核心：數據抓取與指標計算 (平行運算版)
 # ==========================================
 def format_price(val):
     if val is None or val == 0: return "$0.00"
     if val < 0.0001: return f"${val:.8f}"
     elif val < 10.0: return f"${val:.4f}"
     else: return f"${val:,.2f}"
-
-@st.cache_data(ttl=15) # 設定 15 秒快取
-def fetch_and_analyze(symbol, timeframe='15m', limit=200):
-    try:
-        exchange = ccxt.kraken()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # --- 指標計算 ---
-        df['ema20'] = ta.ema(df['close'], length=PARAMS['ema_s'])
-        df['ema50'] = ta.ema(df['close'], length=PARAMS['ema_m'])
-        df['ema200'] = ta.ema(df['close'], length=PARAMS['ema_l'])
-        df['rsi'] = ta.rsi(df['close'], length=PARAMS['rsi_len'])
-        
-        bb = ta.bbands(df['close'], length=PARAMS['bb_len'], std=PARAMS['bb_std'])
-        if bb is not None:
-            df['bb_u'] = bb.iloc[:, 0]
-            df['bb_m'] = bb.iloc[:, 1]
-            df['bb_l'] = bb.iloc[:, 2]
-
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=PARAMS['atr_len'])
-        df['struct_h'] = df['high'].rolling(PARAMS['fib_window']).max()
-        df['struct_l'] = df['low'].rolling(PARAMS['fib_window']).min()
-        df['vol_ma'] = df['volume'].rolling(20).mean()
-
-        # --- 策略分析 ---
-        return analyze_logic(df)
-        
-    except Exception as e:
-        return None
 
 def check_candle_pattern(row, prev):
     body = abs(row['close'] - row['open'])
@@ -151,20 +122,61 @@ def analyze_logic(df):
         "sl": sl, "tp1": tp1, "tp2": tp2, "rsi": curr['rsi']
     }
 
+# --- 核心優化：單一幣種抓取 (不快取，由外部統一快取) ---
+def process_single_coin(name, symbol, timeframe):
+    try:
+        exchange = ccxt.kraken()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=200)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # 指標計算
+        df['ema20'] = ta.ema(df['close'], length=PARAMS['ema_s'])
+        df['ema50'] = ta.ema(df['close'], length=PARAMS['ema_m'])
+        df['ema200'] = ta.ema(df['close'], length=PARAMS['ema_l'])
+        df['rsi'] = ta.rsi(df['close'], length=PARAMS['rsi_len'])
+        
+        bb = ta.bbands(df['close'], length=PARAMS['bb_len'], std=PARAMS['bb_std'])
+        if bb is not None:
+            df['bb_u'] = bb.iloc[:, 0]
+            df['bb_m'] = bb.iloc[:, 1]
+            df['bb_l'] = bb.iloc[:, 2]
+
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=PARAMS['atr_len'])
+        df['struct_h'] = df['high'].rolling(PARAMS['fib_window']).max()
+        df['struct_l'] = df['low'].rolling(PARAMS['fib_window']).min()
+        df['vol_ma'] = df['volume'].rolling(20).mean()
+
+        result = analyze_logic(df)
+        return name, result
+    except Exception as e:
+        return name, None
+
+# --- 核心優化：平行多執行緒抓取 (快取層) ---
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_all_market_data(coins_dict, timeframe):
+    results = {}
+    # 使用 ThreadPoolExecutor 開啟多個執行緒同時抓資料
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_coin = {
+            executor.submit(process_single_coin, name, symbol, timeframe): name 
+            for name, symbol in coins_dict.items()
+        }
+        for future in concurrent.futures.as_completed(future_to_coin):
+            name, data = future.result()
+            results[name] = data
+    return results
+
 # ==========================================
-# 3. 側邊欄：全市場掃描 (修復跳動問題)
+# 3. 側邊欄：全市場掃描 (極速版)
 # ==========================================
-st.sidebar.header("📡 全市場掃描 (Kraken)")
+st.sidebar.header("🚀 極速市場掃描 (Kraken)")
 timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h"], value="15m")
 
-# 先建立一個快取字典，把掃描結果存起來
-scan_results = {}
-with st.spinner("正在掃描市場..."):
-    for name, symbol in BASE_COINS.items():
-        scan_results[name] = fetch_and_analyze(symbol, timeframe=timeframe)
+# 一次性平行抓取所有資料
+with st.spinner("⚡ 正在平行掃描全市場訊號..."):
+    scan_results = fetch_all_market_data(BASE_COINS, timeframe)
 
-# 定義顯示格式函式 (這是解決選單跳動的關鍵)
-# 選單只認 "BTC", "ETH" 這種固定名稱，顯示時才動態加上價格和燈號
+# 定義顯示格式函式
 def format_func_scanner(option_name):
     data = scan_results.get(option_name)
     if data:
@@ -174,27 +186,25 @@ def format_func_scanner(option_name):
         elif data['direction'] == 0:
             return f"⚪ {option_name} {price_fmt}" # 灰燈
         else:
-            return f"🔴 {option_name} {price_fmt}" # 紅燈 (觀望)
+            return f"🔴 {option_name} {price_fmt}" # 紅燈
     return f"⚠️ {option_name}"
 
-# 使用固定的 key 列表 (BASE_COINS.keys()) 做為選單
-# 這樣就算價格變動，Streamlit 也能認得你選的是 "ETH" 而不會重置
+# 選單
 selected_coin_name = st.sidebar.radio(
     "點擊查看詳情：", 
     options=list(BASE_COINS.keys()), 
     format_func=format_func_scanner,
-    key="main_coin_selector"  # 🔥 關鍵修復：加入固定的 key
+    key="main_coin_selector"
 )
-
-selected_symbol = BASE_COINS[selected_coin_name]
 
 if st.sidebar.button("🔄 重新掃描"):
     st.cache_data.clear()
     st.rerun()
 
 # ==========================================
-# 4. 主畫面渲染
+# 4. 主畫面渲染 (直接拿快取資料，秒開)
 # ==========================================
+# 這裡不需要再 fetch 一次，直接從 scan_results 拿
 data = scan_results.get(selected_coin_name)
 
 if data:
@@ -216,17 +226,13 @@ if data:
     else:
         signal_text = f"👀 條件未滿 (Score {data['score']}/6)"
 
-    # 處理原因列表 (紅綠勾勾)
-    # direction 1 (多) -> 綠色勾勾
-    # direction -1 (空) -> 紅色勾勾
+    # 處理原因列表
     reasons_html = ""
     for r_type, r_text in data['reasons']:
         if r_type == 1:
-            # 綠勾
             icon = "<span style='color:#00cc96; font-size:1.2em;'>✔</span>" 
             text_color = "#00cc96"
         else:
-            # 紅勾
             icon = "<span style='color:#ef553b; font-size:1.2em;'>✔</span>"
             text_color = "#ef553b"
             
