@@ -182,7 +182,8 @@ def format_func_scanner(option_name):
 selected_coin_name = st.sidebar.radio(
     "點擊查看詳情：", 
     options=list(BASE_COINS.keys()), 
-    format_func=format_func_scanner
+    format_func=format_func_scanner,
+    key="main_coin_selector"  # 🔥 關鍵修復：加入固定的 key
 )
 
 selected_symbol = BASE_COINS[selected_coin_name]
