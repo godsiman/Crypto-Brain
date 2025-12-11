@@ -8,7 +8,7 @@ import streamlit.components.v1 as components
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Scanner)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Stable)", layout="wide")
 
 # 定義基礎幣種清單
 BASE_COINS = {
@@ -39,10 +39,10 @@ def format_price(val):
     elif val < 10.0: return f"${val:.4f}"
     else: return f"${val:,.2f}"
 
-@st.cache_data(ttl=15) # 設定 15 秒快取，避免切換時卡頓
+@st.cache_data(ttl=15) # 設定 15 秒快取
 def fetch_and_analyze(symbol, timeframe='15m', limit=200):
     try:
-        exchange = ccxt.kraken() # 使用 Kraken
+        exchange = ccxt.kraken()
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
@@ -63,7 +63,7 @@ def fetch_and_analyze(symbol, timeframe='15m', limit=200):
         df['struct_l'] = df['low'].rolling(PARAMS['fib_window']).min()
         df['vol_ma'] = df['volume'].rolling(20).mean()
 
-        # --- 策略分析 (Return Score) ---
+        # --- 策略分析 ---
         return analyze_logic(df)
         
     except Exception as e:
@@ -103,28 +103,41 @@ def analyze_logic(df):
 
     # 計分
     score = 0
-    reasons = []
+    reasons = [] # 格式: (type, text) -> type: 1(多), -1(空)
+    
     pin_bull, pin_bear, engulf_bull, engulf_bear = check_candle_pattern(curr, prev)
     diff = curr['struct_h'] - curr['struct_l']
     fib_0618 = curr['struct_h'] - (diff * 0.618)
     
     if direction == 1: # 多頭條件
         recent_low = df['low'].iloc[-10:-1].min()
-        if curr['low'] < recent_low and curr['close'] > recent_low: score += 1; reasons.append("✅ 掃 Liquidity")
-        if prev['rsi'] < 40 and curr['rsi'] > 40: score += 1; reasons.append("✅ RSI 低檔反轉")
-        if pin_bull or engulf_bull: score += 1; reasons.append("✅ K線 (PinBar/吞沒)")
-        if curr['close'] > curr['bb_m'] and prev['close'] < curr['bb_m']: score += 1; reasons.append("✅ 站回布林中軌")
-        if curr['volume'] > curr['vol_ma'] * 1.2: score += 1; reasons.append("✅ 成交量放大")
-        if abs(price - fib_0618)/price < 0.005: score += 1; reasons.append("✅ 回踩 Fib 0.618")
+        if curr['low'] < recent_low and curr['close'] > recent_low: 
+            score += 1; reasons.append((1, "掃 Liquidity (下影線)"))
+        if prev['rsi'] < 40 and curr['rsi'] > 40: 
+            score += 1; reasons.append((1, "RSI 低檔反轉"))
+        if pin_bull or engulf_bull: 
+            score += 1; reasons.append((1, "K線 (PinBar/吞沒)"))
+        if curr['close'] > curr['bb_m'] and prev['close'] < curr['bb_m']: 
+            score += 1; reasons.append((1, "站回布林中軌"))
+        if curr['volume'] > curr['vol_ma'] * 1.2: 
+            score += 1; reasons.append((1, "成交量放大"))
+        if abs(price - fib_0618)/price < 0.005: 
+            score += 1; reasons.append((1, "回踩 Fib 0.618"))
 
     elif direction == -1: # 空頭條件
         recent_high = df['high'].iloc[-10:-1].max()
-        if curr['high'] > recent_high and curr['close'] < recent_high: score += 1; reasons.append("✅ 掃 Liquidity")
-        if prev['rsi'] > 60 and curr['rsi'] < 60: score += 1; reasons.append("✅ RSI 高檔回落")
-        if pin_bear or engulf_bear: score += 1; reasons.append("✅ K線 (倒鎚/吞沒)")
-        if curr['close'] < curr['bb_m'] and prev['close'] > curr['bb_m']: score += 1; reasons.append("✅ 跌破布林中軌")
-        if curr['volume'] > curr['vol_ma'] * 1.2: score += 1; reasons.append("✅ 成交量放大")
-        if abs(price - fib_0618)/price < 0.005: score += 1; reasons.append("✅ 反彈至 Fib 0.618")
+        if curr['high'] > recent_high and curr['close'] < recent_high: 
+            score += 1; reasons.append((-1, "掃 Liquidity (假突破)"))
+        if prev['rsi'] > 60 and curr['rsi'] < 60: 
+            score += 1; reasons.append((-1, "RSI 高檔回落"))
+        if pin_bear or engulf_bear: 
+            score += 1; reasons.append((-1, "K線 (倒鎚/吞沒)"))
+        if curr['close'] < curr['bb_m'] and prev['close'] > curr['bb_m']: 
+            score += 1; reasons.append((-1, "跌破布林中軌"))
+        if curr['volume'] > curr['vol_ma'] * 1.2: 
+            score += 1; reasons.append((-1, "成交量放大"))
+        if abs(price - fib_0618)/price < 0.005: 
+            score += 1; reasons.append((-1, "反彈至 Fib 0.618"))
 
     # 止盈止損
     atr = curr['atr']
@@ -139,44 +152,40 @@ def analyze_logic(df):
     }
 
 # ==========================================
-# 3. 側邊欄：全市場掃描 (Market Scanner)
+# 3. 側邊欄：全市場掃描 (修復跳動問題)
 # ==========================================
 st.sidebar.header("📡 全市場掃描 (Kraken)")
 timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h"], value="15m")
 
-# 在這裡先掃描一次所有幣種，產生帶有燈號的清單
-display_options = {}
-reverse_lookup = {} # 用來反查 symbol
-
-with st.spinner("正在掃描市場訊號..."):
+# 先建立一個快取字典，把掃描結果存起來
+scan_results = {}
+with st.spinner("正在掃描市場..."):
     for name, symbol in BASE_COINS.items():
-        # 預設狀態
-        label = f"⚪ {name}"
-        
-        # 呼叫分析函式 (有快取，所以速度會越來越快)
-        data = fetch_and_analyze(symbol, timeframe=timeframe)
-        
-        if data:
-            price_fmt = format_price(data['price'])
-            if data['score'] >= 3:
-                # 綠燈：有訊號
-                label = f"🟢 {name} {price_fmt}"
-            elif data['direction'] == 0:
-                # 灰燈：盤整
-                label = f"⚪ {name} {price_fmt}"
-            else:
-                # 紅燈：有趨勢但條件未滿 (觀望)
-                label = f"🔴 {name} {price_fmt}"
-        else:
-            label = f"⚠️ {name} (Error)"
-            
-        display_options[label] = symbol
-        reverse_lookup[label] = name
+        scan_results[name] = fetch_and_analyze(symbol, timeframe=timeframe)
 
-# 側邊欄選單 (顯示帶有燈號的選項)
-selected_label = st.sidebar.radio("點擊查看詳情：", list(display_options.keys()))
-selected_symbol = display_options[selected_label]
-selected_name = reverse_lookup[selected_label]
+# 定義顯示格式函式 (這是解決選單跳動的關鍵)
+# 選單只認 "BTC", "ETH" 這種固定名稱，顯示時才動態加上價格和燈號
+def format_func_scanner(option_name):
+    data = scan_results.get(option_name)
+    if data:
+        price_fmt = format_price(data['price'])
+        if data['score'] >= 3:
+            return f"🟢 {option_name} {price_fmt}" # 綠燈
+        elif data['direction'] == 0:
+            return f"⚪ {option_name} {price_fmt}" # 灰燈
+        else:
+            return f"🔴 {option_name} {price_fmt}" # 紅燈 (觀望)
+    return f"⚠️ {option_name}"
+
+# 使用固定的 key 列表 (BASE_COINS.keys()) 做為選單
+# 這樣就算價格變動，Streamlit 也能認得你選的是 "ETH" 而不會重置
+selected_coin_name = st.sidebar.radio(
+    "點擊查看詳情：", 
+    options=list(BASE_COINS.keys()), 
+    format_func=format_func_scanner
+)
+
+selected_symbol = BASE_COINS[selected_coin_name]
 
 if st.sidebar.button("🔄 重新掃描"):
     st.cache_data.clear()
@@ -185,7 +194,7 @@ if st.sidebar.button("🔄 重新掃描"):
 # ==========================================
 # 4. 主畫面渲染
 # ==========================================
-data = fetch_and_analyze(selected_symbol, timeframe=timeframe)
+data = scan_results.get(selected_coin_name)
 
 if data:
     p_price = format_price(data['price'])
@@ -193,24 +202,38 @@ if data:
     p_tp1 = format_price(data['tp1'])
     p_tp2 = format_price(data['tp2'])
 
-    # 燈號顏色邏輯
-    card_color = "#333" # 預設深灰
+    card_color = "#333" 
     signal_text = "⏳ 觀望中 (Wait)"
     
     if data['score'] >= 3:
         if data['direction'] == 1:
-            card_color = "rgba(0, 204, 150, 0.2)" # 綠底
+            card_color = "rgba(0, 204, 150, 0.2)"
             signal_text = f"🚀 訊號成立 (Score {data['score']}) - 做多 LONG"
         elif data['direction'] == -1:
-            card_color = "rgba(239, 85, 59, 0.2)" # 紅底
+            card_color = "rgba(239, 85, 59, 0.2)"
             signal_text = f"🔻 訊號成立 (Score {data['score']}) - 做空 SHORT"
     else:
         signal_text = f"👀 條件未滿 (Score {data['score']}/6)"
 
-    # 原因列表
+    # 處理原因列表 (紅綠勾勾)
+    # direction 1 (多) -> 綠色勾勾
+    # direction -1 (空) -> 紅色勾勾
     reasons_html = ""
-    for r in data['reasons']:
-        reasons_html += f"<div style='color:#fff; font-size:0.9em; margin-bottom:3px; padding-left:10px; border-left:2px solid #888;'>{r}</div>"
+    for r_type, r_text in data['reasons']:
+        if r_type == 1:
+            # 綠勾
+            icon = "<span style='color:#00cc96; font-size:1.2em;'>✔</span>" 
+            text_color = "#00cc96"
+        else:
+            # 紅勾
+            icon = "<span style='color:#ef553b; font-size:1.2em;'>✔</span>"
+            text_color = "#ef553b"
+            
+        reasons_html += f"""
+        <div style='color:#fff; font-size:1em; margin-bottom:5px; padding: 5px; background:rgba(255,255,255,0.05); border-radius:4px;'>
+            {icon} <span style='color:{text_color}; font-weight:bold;'>{r_text}</span>
+        </div>
+        """
 
     html_content = f"""
     <!DOCTYPE html>
@@ -229,7 +252,7 @@ if data:
     </head>
     <body>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-            <h1>🔥 {selected_name} 智能戰情室</h1>
+            <h1>🔥 {selected_coin_name} 智能戰情室</h1>
             <div style="text-align:right; color:#888;">Kraken | {timeframe}</div>
         </div>
 
