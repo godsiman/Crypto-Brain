@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 # ==========================================
 # 1. 系統設定與參數
 # ==========================================
-st.set_page_config(page_title="Crypto God Mode (Turbo)", layout="wide")
+st.set_page_config(page_title="Crypto God Mode (Real-Time)", layout="wide")
 
 # 定義基礎幣種清單
 BASE_COINS = {
@@ -122,7 +122,7 @@ def analyze_logic(df):
         "sl": sl, "tp1": tp1, "tp2": tp2, "rsi": curr['rsi']
     }
 
-# --- 核心優化：單一幣種抓取 (不快取，由外部統一快取) ---
+# --- 核心優化：單一幣種抓取 ---
 def process_single_coin(name, symbol, timeframe):
     try:
         exchange = ccxt.kraken()
@@ -151,11 +151,10 @@ def process_single_coin(name, symbol, timeframe):
     except Exception as e:
         return name, None
 
-# --- 核心優化：平行多執行緒抓取 (快取層) ---
-@st.cache_data(ttl=15, show_spinner=False)
+# --- 快取層 (改為 3 秒 TTL，接近即時) ---
+@st.cache_data(ttl=3, show_spinner=False)
 def fetch_all_market_data(coins_dict, timeframe):
     results = {}
-    # 使用 ThreadPoolExecutor 開啟多個執行緒同時抓資料
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_coin = {
             executor.submit(process_single_coin, name, symbol, timeframe): name 
@@ -167,14 +166,16 @@ def fetch_all_market_data(coins_dict, timeframe):
     return results
 
 # ==========================================
-# 3. 側邊欄：全市場掃描 (極速版)
+# 3. 側邊欄：控制台 (加入自動刷新開關)
 # ==========================================
-st.sidebar.header("🚀 極速市場掃描 (Kraken)")
+st.sidebar.header("🚀 即時市場掃描")
+
+# 自動刷新開關
+auto_refresh = st.sidebar.toggle("⚡ 開啟即時刷新 (3秒)", value=True)
 timeframe = st.sidebar.select_slider("時間級別", options=["5m", "15m", "1h", "4h"], value="15m")
 
-# 一次性平行抓取所有資料
-with st.spinner("⚡ 正在平行掃描全市場訊號..."):
-    scan_results = fetch_all_market_data(BASE_COINS, timeframe)
+# 執行抓取
+scan_results = fetch_all_market_data(BASE_COINS, timeframe)
 
 # 定義顯示格式函式
 def format_func_scanner(option_name):
@@ -197,14 +198,13 @@ selected_coin_name = st.sidebar.radio(
     key="main_coin_selector"
 )
 
-if st.sidebar.button("🔄 重新掃描"):
+if st.sidebar.button("🔄 手動刷新"):
     st.cache_data.clear()
     st.rerun()
 
 # ==========================================
-# 4. 主畫面渲染 (直接拿快取資料，秒開)
+# 4. 主畫面渲染
 # ==========================================
-# 這裡不需要再 fetch 一次，直接從 scan_results 拿
 data = scan_results.get(selected_coin_name)
 
 if data:
@@ -226,7 +226,6 @@ if data:
     else:
         signal_text = f"👀 條件未滿 (Score {data['score']}/6)"
 
-    # 處理原因列表
     reasons_html = ""
     for r_type, r_text in data['reasons']:
         if r_type == 1:
@@ -318,3 +317,10 @@ if data:
     components.html(html_content, height=600, scrolling=True)
 else:
     st.error("暫時無法獲取數據，請稍後再試。")
+
+# ==========================================
+# 5. 自動刷新循環 (核心改動)
+# ==========================================
+if auto_refresh:
+    time.sleep(3) # 等待 3 秒
+    st.rerun()    # 強制重跑程式
